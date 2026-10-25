@@ -1,0 +1,6 @@
+PLAYER1=images/ced.png
+PLAYER2=images/amiel.png
+PLAYER3=images/ian.png
+PLAYER1_TOP=images/ced_top.png
+PLAYER2_TOP=images/amiel_top.png
+PLAYER3_TOP=images/ian_top.png

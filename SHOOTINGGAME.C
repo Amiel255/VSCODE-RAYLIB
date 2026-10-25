@@ -1,0 +1,1121 @@
+#include "raylib.h"
+#include <stdio.h>
+#include <math.h>
+
+// --------------------------------------------------------
+// 1. TYPE DEFINITIONS
+// --------------------------------------------------------
+
+// GameState — represents which screen/state the game is currently in
+typedef enum GameState
+{
+    STATE_MENU,      // Main menu screen
+    STATE_GAME,      // Character selection + gameplay
+    STATE_OPTIONS,   // (Reserved) Options/settings screen
+    STATE_COUNTDOWN, // Countdown before gameplay starts
+    STATE_GAMEOVER,  // Game over screen
+    STATE_SCORE      // Score/ranking screen
+} GameState;
+
+// Player — data for the controlled character
+typedef struct
+{
+    Texture2D texture; // Player sprite
+    Vector2 position;  // Current position on screen
+    float speed;       // Movement speed
+    float scale;       // Sprite scale factor
+    float rotationDeg; // Sprite rotation (for aiming)
+} Player;
+
+// Bullet — data for each bullet fired by the player
+typedef struct
+{
+    Vector2 position;  // Current bullet position
+    Vector2 velocity;  // Bullet movement vector
+    float rotationDeg; // Bullet visual rotation
+    float life;        // Remaining life in seconds
+    bool active;       // Is this bullet currently in use?
+} Bullet;
+
+// Enemy — data for each enemy in the game
+typedef struct
+{
+    Vector2 position;  // Current enemy position
+    Vector2 velocity;  // (Optional) movement vector
+    float rotationDeg; // Enemy visual rotation
+    bool active;       // Is this enemy currently in use?
+} Enemy;
+
+// --------------------------------------------------------
+// 2. CONSTANTS / GLOBAL TUNING VALUES
+// --------------------------------------------------------
+
+// Bullet tuning
+#define MAX_BULLETS 125
+#define BULLET_SPEED 700.0f
+#define BULLET_LIFE 1.5f
+#define BULLET_W 12.0f
+#define BULLET_H 4.0f
+
+// Enemy tuning
+#define MAX_ENEMIES 6
+#define ENEMY_SPEED 175.0f
+
+// Player health
+#define PLAYER_MAX_HEALTH 3
+
+// --------------------------------------------------------
+// 3. GLOBAL GAME SYSTEM VARIABLES
+// --------------------------------------------------------
+
+// Ammo system — controls bullets and reloading
+int gMaxBullets = 125;        // Max bullets in a full magazine
+int gCurrentBullets = 125;    // Current ammo in magazine
+bool gIsReloading = false;    // Is reload animation in progress?
+float gReloadDuration = 2.5f; // Reload time in seconds
+float gReloadTimer = 0.0f;    // Reload countdown tracker
+
+// Player health and invulnerability frames
+int gPlayerHealth = PLAYER_MAX_HEALTH; // Current HP
+bool gPlayerInvulnerable = false;      // Is player temporarily invincible?
+float gInvulnDuration = 1.0f;          // Duration of invincibility
+float gInvulnTimer = 0.0f;             // Invincibility countdown tracker
+
+// Enemy pool (reusable enemies)
+Enemy gEnemies[MAX_ENEMIES] = {0};
+
+// --------------------------------------------------------
+// 4. HELPER FUNCTIONS
+// --------------------------------------------------------
+
+// ResetEntities — clears all bullets and enemies to an inactive state
+void ResetEntities(Bullet bullets[], Enemy enemies[])
+{
+    for (int i = 0; i < MAX_BULLETS; i++)
+        bullets[i].active = false;
+
+    for (int i = 0; i < MAX_ENEMIES; i++)
+        enemies[i].active = false;
+}
+
+// DrawFullScreen — draws a texture stretched to the full window size
+void DrawFullScreen(Texture2D tex, int screenWidth, int screenHeight)
+{
+    Rectangle src = {0, 0, (float)tex.width, (float)tex.height};     // Use full texture
+    Rectangle dst = {0, 0, (float)screenWidth, (float)screenHeight}; // Scale to screen size
+    Vector2 origin = {0, 0};                                         // Top-left as origin
+    DrawTexturePro(tex, src, dst, origin, 0.0f, WHITE);
+}
+
+// --------------------------------------------------------
+// 5. MAIN GAME FUNCTION
+// --------------------------------------------------------
+
+int main(void)
+{
+    // --------- Window setup ---------
+    const int screenWidth = 1600;
+    const int screenHeight = 900;
+
+    InitWindow(screenWidth, screenHeight, "ALIEN RAID");
+    SetExitKey(KEY_NULL); // Disable ESC auto-exit
+    SetTargetFPS(60);     // Run at 60 FPS
+
+    // --------- Game state variables ---------
+    GameState gameState = STATE_MENU; // Start on menu
+    int menuSelection = 0;            // 0 = START, 1 = QUIT
+
+    int selectedPlayerIndex = 0;  // Which character is highlighted
+    bool playerConfirmed = false; // Has player locked in a character?
+    bool gameStarted = false;     // Has gameplay actually started?
+
+    // Countdown system before game starts
+    bool countdownActive = false;
+    float countdownValue = 3.0f;     // Current countdown display
+    double countdownStartTime = 0.0; // When countdown started
+
+    // Game timer (survival time, 300 seconds = 5 minutes)
+    double gameTimer = 300.0;
+    bool timerActive = false;
+
+    // --------- Assets (names, positions, textures) ---------
+    const char *playerNames[3] = {"CEDRIC", "AMIEL", "IAN"}; // Character names
+    int selectPositions[3] = {400, 700, 1000};               // X positions for character portraits
+
+    // Enemy sprite
+    Texture2D enemyTexture = LoadTexture("assets/enemy.png");
+
+    // Player selection portraits (for character select screen)
+    Texture2D playerPortraits[3];
+    playerPortraits[0] = LoadTexture("assets/ced.png");
+    playerPortraits[1] = LoadTexture("assets/amiel.png");
+    playerPortraits[2] = LoadTexture("assets/ian.png");
+
+    // Player in-game top down textures
+    Texture2D playerTopDown[3];
+    playerTopDown[0] = LoadTexture("assets/ced_top.png");
+    playerTopDown[1] = LoadTexture("assets/amiel_top.png");
+    playerTopDown[2] = LoadTexture("assets/ian_top.png");
+
+    // Backgrounds for different screens
+    Texture2D MenuBg = LoadTexture("assets/menu_bg.png");
+    Texture2D CharSelectBg = LoadTexture("assets/character_selectbg.png");
+    Texture2D GameOverBg = LoadTexture("assets/game_overbg.png");
+    Texture2D ScoreBg = LoadTexture("assets/score_ratingbg.png");
+    Texture2D backgroundTexture = LoadTexture("assets/bgver2.png"); // In-game background
+
+    // --------- Audio setup ---------
+    InitAudioDevice();
+
+    // Sound effects and music
+    Sound sConfirm = LoadSound("assets/Confirm.wav");
+    SetSoundVolume(sConfirm, 0.5f);
+    Sound sSelect = LoadSound("assets/Select.wav");
+    SetSoundVolume(sSelect, 0.5f);
+    Sound sCountdown = LoadSound("assets/Countdown.wav");
+    SetSoundVolume(sCountdown, 0.5f);
+    Sound sReload = LoadSound("assets/reload.wav");
+    SetSoundVolume(sReload, 0.5f);
+    Sound sShoot = LoadSound("assets/Shooting.wav");
+    SetSoundVolume(sShoot, 0.5f);
+    Sound sLose = LoadSound("assets/lose.wav");
+    SetSoundVolume(sLose, 0.5f);
+    Sound sIngame = LoadSound("assets/ingame.wav");
+    SetSoundVolume(sIngame, 0.5f);
+    Sound sDamaged = LoadSound("assets/damaged.wav");
+    SetSoundVolume(sDamaged, 0.5f);
+    Sound sScore = LoadSound("assets/score.wav");
+    SetSoundVolume(sScore, 0.5f);
+    Sound sEnemyDeath = LoadSound("assets/edead.wav");
+    SetSoundVolume(sEnemyDeath, 0.5f);
+    Sound sGameOver = LoadSound("assets/gameover.wav");
+    SetSoundVolume(sGameOver, 0.5f);
+    Sound sIntroMusic = LoadSound("assets/Intro music.wav");
+    SetSoundVolume(sIntroMusic, 0.5f);
+
+
+    // Play intro music on start
+    PlaySound(sIntroMusic);
+
+    // --------- Player and bullets setup ---------
+    Player player = (Player){0};    // Player initialized to zero
+    bool playerInitialized = false; // Becomes true after countdown
+
+    Bullet bullets[MAX_BULLETS] = {0}; // Pool of bullets
+
+    float fireCooldown = 0.0f;      // Time left before next shot
+    const float FIRE_DELAY = 0.20f; // Minimum delay between shots
+
+    // ----------------------------------------------------
+    // 6. MAIN GAME LOOP
+    // ----------------------------------------------------
+    while (!WindowShouldClose())
+    {
+        // ========================= UPDATE LOGIC =========================
+        if (gameState == STATE_MENU)
+        {
+            // --------- MENU: keyboard navigation (UP/DOWN) ---------
+            if (IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_S))
+            {
+                if (menuSelection != 1)
+                {
+                    menuSelection = 1; // Move selection to QUIT
+                    PlaySound(sSelect);
+                }
+            }
+            if (IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_W))
+            {
+                if (menuSelection != 0)
+                {
+                    menuSelection = 0; // Move selection to START
+                    PlaySound(sSelect);
+                }
+            }
+
+            // --------- MENU: compute button rectangles for mouse interaction ---------
+            int renderWidth = GetRenderWidth();
+            int renderHeight = GetRenderHeight();
+            int fontSize = 40;
+            const int padX = 24, padY = 10;
+
+            // START button
+            int startWidth = MeasureText("START GAME", fontSize);
+            int startX = (renderWidth - startWidth) / 2;
+            int startY = renderHeight / 2;
+
+            // QUIT button
+            int quitWidth = MeasureText("QUIT GAME", fontSize);
+            int quitX = (renderWidth - quitWidth) / 2;
+            int quitY = startY + 60;
+
+            Rectangle btnStart = (Rectangle){
+                startX - padX, startY - padY,
+                startWidth + 2 * padX, fontSize + 2 * padY};
+            Rectangle btnQuit = (Rectangle){
+                quitX - padX, quitY - padY,
+                quitWidth + 2 * padX, fontSize + 2 * padY};
+
+            // --------- MENU: mouse hover detection ---------
+            Vector2 mouse = GetMousePosition();
+            bool hoverStart = CheckCollisionPointRec(mouse, btnStart);
+            bool hoverQuit = CheckCollisionPointRec(mouse, btnQuit);
+
+            if (hoverStart)
+                menuSelection = 0;
+            if (hoverQuit)
+                menuSelection = 1;
+
+            // --------- MENU: ENTER key selection ---------
+            if (IsKeyPressed(KEY_ENTER))
+            {
+                if (menuSelection == 0)
+                {
+                    // Start game: reset game-related variables
+                    gameState = STATE_GAME;
+                    playerConfirmed = false;
+                    gameStarted = false;
+                    countdownActive = false;
+                    countdownValue = 3.0f;
+                    playerInitialized = false;
+
+                    gCurrentBullets = gMaxBullets;
+                    gIsReloading = false;
+
+                    gameTimer = 300.0;
+                    timerActive = false;
+
+                gPlayerHealth = PLAYER_MAX_HEALTH;
+                gPlayerInvulnerable = false;
+                gInvulnTimer = 0.0f;
+
+                fireCooldown = 0.0f;
+
+                ResetEntities(bullets, gEnemies);
+                PlaySound(sConfirm);
+                    WaitTime(0.15f); // Small delay to avoid input bleed
+                }
+                else if (menuSelection == 1)
+                {
+                    // Quit game
+                    break;
+                }
+            }
+
+            // --------- MENU: mouse click on START ---------
+            if (hoverStart && IsMouseButtonPressed(MOUSE_LEFT_BUTTON))
+            {
+                // Same as pressing ENTER on START
+                gameState = STATE_GAME;
+                playerConfirmed = false;
+                gameStarted = false;
+                countdownActive = false;
+                countdownValue = 3.0f;
+                playerInitialized = false;
+
+                gCurrentBullets = gMaxBullets;
+                gIsReloading = false;
+
+                gameTimer = 300.0;
+                timerActive = false;
+
+                gPlayerHealth = PLAYER_MAX_HEALTH;
+                gPlayerInvulnerable = false;
+                gInvulnTimer = 0.0f;
+
+                ResetEntities(bullets, gEnemies);
+                PlaySound(sConfirm);
+                WaitTime(0.15f);
+            }
+
+            // --------- MENU: mouse click on QUIT ---------
+            if (hoverQuit && IsMouseButtonPressed(MOUSE_LEFT_BUTTON))
+            {
+                break; // Exit main loop
+            }
+        }
+        else if (gameState == STATE_GAME)
+        {
+            // --------- GAME: ESC returns to menu and resets game state ---------
+            if (IsKeyPressed(KEY_ESCAPE))
+            {
+                gameState = STATE_MENU;
+                playerConfirmed = false;
+                gameStarted = false;
+                countdownActive = false;
+                countdownValue = 3.0f;
+                playerInitialized = false;
+
+                gCurrentBullets = gMaxBullets;
+                gIsReloading = false;
+                timerActive = false;
+
+                gPlayerHealth = PLAYER_MAX_HEALTH;
+                gPlayerInvulnerable = false;
+                gInvulnTimer = 0.0f;
+
+                ResetEntities(bullets, gEnemies);
+                PlaySound(sConfirm);
+
+                // Switch back to intro music if needed
+                if (IsSoundPlaying(sIngame))
+                    StopSound(sIngame);
+                if (!IsSoundPlaying(sIntroMusic))
+                    PlaySound(sIntroMusic);
+            }
+
+            // --------- Character selection phase (before countdown) ---------
+            if (!playerConfirmed)
+            {
+                // Move selection RIGHT
+                if (IsKeyPressed(KEY_RIGHT))
+                {
+                    selectedPlayerIndex = (selectedPlayerIndex + 1) % 3;
+                    PlaySound(sSelect);
+                }
+                // Move selection LEFT
+                if (IsKeyPressed(KEY_LEFT))
+                {
+                    selectedPlayerIndex = (selectedPlayerIndex - 1 + 3) % 3;
+                    PlaySound(sSelect);
+                }
+                // Confirm chosen character
+                if (IsKeyPressed(KEY_ENTER))
+                {
+                    playerConfirmed = true;
+                    PlaySound(sConfirm);
+                }
+            }
+            // --------- After character is chosen but before countdown/game ---------
+            else if (playerConfirmed && !gameStarted)
+            {
+                if (IsKeyPressed(KEY_ENTER))
+                {
+                    // Move to countdown state
+                    gameState = STATE_COUNTDOWN;
+                    countdownActive = true;
+                    countdownStartTime = GetTime();
+
+                    PlaySound(sConfirm);
+                    PlaySound(sCountdown);
+                    StopSound(sIntroMusic);
+                }
+            }
+
+            // --------- Main gameplay update (movement, shooting, enemies) ---------
+            if (gameStarted && playerInitialized)
+            {
+                float dt = GetFrameTime(); // Time step between frames
+
+                // --- Invulnerability handling ---
+                if (gPlayerInvulnerable)
+                {
+                    gInvulnTimer -= dt;
+                    if (gInvulnTimer <= 0.0f)
+                        gPlayerInvulnerable = false;
+                }
+
+                // --- Shooting cooldown ---
+                if (fireCooldown > 0.0f)
+                    fireCooldown -= dt;
+
+                // --- Game timer countdown ---
+                if (timerActive)
+                {
+                    gameTimer -= dt;
+                    if (gameTimer <= 0.0)
+                    {
+                        // Time's up — trigger Game Over
+                        gameTimer = 0.0;
+                        timerActive = false;
+
+                        gameState = STATE_GAMEOVER;
+                        playerConfirmed = false;
+                        gameStarted = false;
+                        countdownActive = false;
+                        playerInitialized = false;
+
+                        gCurrentBullets = gMaxBullets;
+                        gIsReloading = false;
+
+                        gPlayerHealth = PLAYER_MAX_HEALTH;
+                        gPlayerInvulnerable = false;
+                        gInvulnTimer = 0.0f;
+
+                        ResetEntities(bullets, gEnemies);
+
+                        StopSound(sIngame);
+                        PlaySound(sGameOver);
+                    }
+                }
+
+                // --- Player movement input (WASD / arrow keys) ---
+                Vector2 move = {0.0f, 0.0f};
+                if (IsKeyDown(KEY_A) || IsKeyDown(KEY_LEFT))
+                    move.x -= 1.0f;
+                if (IsKeyDown(KEY_D) || IsKeyDown(KEY_RIGHT))
+                    move.x += 1.0f;
+                if (IsKeyDown(KEY_W) || IsKeyDown(KEY_UP))
+                    move.y -= 1.0f;
+                if (IsKeyDown(KEY_S) || IsKeyDown(KEY_DOWN))
+                    move.y += 1.0f;
+
+                // Normalize diagonal movement
+                if (move.x != 0 || move.y != 0)
+                {
+                    float len = sqrtf(move.x * move.x + move.y * move.y);
+                    move.x /= len;
+                    move.y /= len;
+                }
+
+                // Apply movement
+                player.position.x += move.x * player.speed * dt;
+                player.position.y += move.y * player.speed * dt;
+
+                // --- Clamp player inside screen bounds ---
+                float pw = player.texture.width * player.scale;
+                float ph = player.texture.height * player.scale;
+
+                if (player.position.x < 0)
+                    player.position.x = 0;
+                if (player.position.y < 0)
+                    player.position.y = 0;
+                if (player.position.x > screenWidth - pw)
+                    player.position.x = screenWidth - pw;
+                if (player.position.y > screenHeight - ph)
+                    player.position.y = screenHeight - ph;
+
+                // --- Player hitbox (smaller than the sprite) ---
+                float hitScale = 0.5f;
+                float shrinkX = pw * (1.0f - hitScale) * 0.5f;
+                float shrinkY = ph * (1.0f - hitScale) * 0.5f;
+
+                Rectangle playerHitbox = {
+                    player.position.x + shrinkX,
+                    player.position.y + shrinkY,
+                    pw * hitScale,
+                    ph * hitScale};
+
+                // --- Aim direction: from player center to mouse ---
+                Vector2 mouse = GetMousePosition();
+                Vector2 playerCenter = {
+                    player.position.x + pw * 0.5f,
+                    player.position.y + ph * 0.5f};
+
+                Vector2 aimDir = {mouse.x - playerCenter.x, mouse.y - playerCenter.y};
+                float aimLen = sqrtf(aimDir.x * aimDir.x + aimDir.y * aimDir.y);
+                if (aimLen > 0.0001f)
+                {
+                    aimDir.x /= aimLen;
+                    aimDir.y /= aimLen;
+                }
+
+                // Rotate player so head points toward mouse
+                player.rotationDeg = atan2f(aimDir.y, aimDir.x) * (180.0f / PI) - 90.0f;
+
+                // --- Shooting logic (mouse left + cooldown + ammo + not reloading) ---
+                if ((IsMouseButtonPressed(MOUSE_LEFT_BUTTON) || IsMouseButtonDown(MOUSE_LEFT_BUTTON)) &&
+                    fireCooldown <= 0.0f && !gIsReloading && gCurrentBullets > 0)
+                {
+                    PlaySound(sShoot);
+
+                    // Find an inactive bullet and reuse it
+                    for (int i = 0; i < MAX_BULLETS; i++)
+                    {
+                        if (!bullets[i].active)
+                        {
+                            float muzzleDist = fmaxf(pw, ph) * 0.5f;
+
+                            // Spawn bullet slightly in front of player
+                            Vector2 spawn = {
+                                playerCenter.x + aimDir.x * muzzleDist,
+                                playerCenter.y + aimDir.y * muzzleDist};
+
+                            bullets[i].position = spawn;
+                            bullets[i].velocity = (Vector2){aimDir.x * BULLET_SPEED, aimDir.y * BULLET_SPEED};
+                            bullets[i].rotationDeg = atan2f(aimDir.y, aimDir.x) * (180.0f / PI);
+                            bullets[i].life = BULLET_LIFE;
+                            bullets[i].active = true;
+
+                            fireCooldown = FIRE_DELAY; // Reset fire delay
+                            gCurrentBullets--;         // Use one bullet
+                            break;
+                        }
+                    }
+                }
+
+                // --- Update bullets (movement, lifetime, offscreen) ---
+                for (int i = 0; i < MAX_BULLETS; i++)
+                {
+                    if (!bullets[i].active)
+                        continue;
+
+                    bullets[i].position.x += bullets[i].velocity.x * dt;
+                    bullets[i].position.y += bullets[i].velocity.y * dt;
+                    bullets[i].life -= dt;
+
+                    if (bullets[i].life <= 0.0f ||
+                        bullets[i].position.x < -50 || bullets[i].position.x > screenWidth + 50 ||
+                        bullets[i].position.y < -50 || bullets[i].position.y > screenHeight + 50)
+                    {
+                        bullets[i].active = false;
+                    }
+                }
+
+                // --- Spawn enemies (random corners, random number per update) ---
+                int enemiesToSpawn = GetRandomValue(1, 2);
+                for (int e = 0; e < enemiesToSpawn; e++)
+                {
+                    for (int i = 0; i < MAX_ENEMIES; i++)
+                    {
+                        if (!gEnemies[i].active)
+                        {
+                            int corner = GetRandomValue(0, 3);
+                            switch (corner)
+                            {
+                            case 0:
+                                gEnemies[i].position = (Vector2){0, 0};
+                                break;
+                            case 1:
+                                gEnemies[i].position = (Vector2){screenWidth - 40, 0};
+                                break;
+                            case 2:
+                                gEnemies[i].position = (Vector2){0, screenHeight - 40};
+                                break;
+                            case 3:
+                                gEnemies[i].position = (Vector2){screenWidth - 40, screenHeight - 40};
+                                break;
+                            }
+                            gEnemies[i].active = true;
+                            break;
+                        }
+                    }
+                }
+
+                // --- Move enemies toward player ---
+                float enemyScale = 0.2f;
+                float enemyW = enemyTexture.width * enemyScale;
+                float enemyH = enemyTexture.height * enemyScale;
+
+                for (int i = 0; i < MAX_ENEMIES; i++)
+                {
+                    if (!gEnemies[i].active)
+                        continue;
+
+                    Vector2 dir = {
+                        playerCenter.x - gEnemies[i].position.x,
+                        playerCenter.y - gEnemies[i].position.y};
+
+                    float len = sqrtf(dir.x * dir.x + dir.y * dir.y);
+                    if (len > 0)
+                    {
+                        dir.x /= len;
+                        dir.y /= len;
+                    }
+
+                    gEnemies[i].position.x += dir.x * ENEMY_SPEED * dt;
+                    gEnemies[i].position.y += dir.y * ENEMY_SPEED * dt;
+                    gEnemies[i].rotationDeg = atan2f(dir.y, dir.x) * RAD2DEG + 90.0f;
+                }
+
+                // --- Enemy hits player collision check ---
+                for (int i = 0; i < MAX_ENEMIES; i++)
+                {
+                    if (!gEnemies[i].active)
+                        continue;
+
+                    Rectangle enemyHitbox = {
+                        gEnemies[i].position.x - enemyW * 0.5f,
+                        gEnemies[i].position.y - enemyH * 0.5f,
+                        enemyW,
+                        enemyH};
+
+                    if (!gPlayerInvulnerable && CheckCollisionRecs(playerHitbox, enemyHitbox))
+                    {
+                        // Player takes damage
+                        PlaySound(sDamaged);
+                        gPlayerHealth--;
+                        gPlayerInvulnerable = true;
+                        gInvulnTimer = gInvulnDuration;
+
+                        gEnemies[i].active = false; // Remove enemy
+
+                        if (gPlayerHealth <= 0)
+                        {
+                            // Player dead => game over
+                            gameState = STATE_GAMEOVER;
+                            playerConfirmed = false;
+                            gameStarted = false;
+                            countdownActive = false;
+                            playerInitialized = false;
+
+                            gCurrentBullets = gMaxBullets;
+                            gIsReloading = false;
+                            timerActive = false;
+
+                            gPlayerHealth = PLAYER_MAX_HEALTH;
+
+                            PlaySound(sLose);
+                            PlaySound(sGameOver);
+                            StopSound(sIngame);
+                        }
+                    }
+                }
+
+                // --- Bullet vs enemy collision ---
+                for (int i = 0; i < MAX_BULLETS; i++)
+                {
+                    if (!bullets[i].active)
+                        continue;
+
+                    Rectangle bulletRect = {
+                        bullets[i].position.x - BULLET_W * 0.5f,
+                        bullets[i].position.y - BULLET_H * 0.5f,
+                        BULLET_W,
+                        BULLET_H};
+
+                    for (int j = 0; j < MAX_ENEMIES; j++)
+                    {
+                        if (!gEnemies[j].active)
+                            continue;
+
+                        Rectangle enemyHitbox = {
+                            gEnemies[j].position.x - enemyW * 0.5f,
+                            gEnemies[j].position.y - enemyH * 0.5f,
+                            enemyW,
+                            enemyH};
+
+                        if (CheckCollisionRecs(bulletRect, enemyHitbox))
+                        {
+                            // Enemy killed by bullet
+                            PlaySound(sEnemyDeath);
+                            gEnemies[j].active = false;
+                            bullets[i].active = false;
+                            break;
+                        }
+                    }
+                }
+
+                // --- Reload system ---
+                if (gIsReloading)
+                {
+                    gReloadTimer -= dt;
+                    if (gReloadTimer <= 0.0f)
+                    {
+                        // Reload complete
+                        gCurrentBullets = gMaxBullets;
+                        gIsReloading = false;
+                    }
+                }
+                else if (IsKeyPressed(KEY_R) && gCurrentBullets < gMaxBullets)
+                {
+                    // Start reload action
+                    PlaySound(sReload);
+                    gIsReloading = true;
+                    gReloadTimer = gReloadDuration;
+                }
+            }
+        }
+        else if (gameState == STATE_COUNTDOWN)
+        {
+            // --------- COUNTDOWN: 3 → 2 → 1 → 0 → START ---------
+            double elapsed = GetTime() - countdownStartTime;
+
+            if (elapsed < 1.0)
+                countdownValue = 3;
+            else if (elapsed < 2.0)
+                countdownValue = 2;
+            else if (elapsed < 3.0)
+                countdownValue = 1;
+            else if (elapsed < 4.0)
+                countdownValue = 0;
+            else
+            {
+                // Countdown finished — start game
+                countdownActive = false;
+                gameStarted = true;
+                gameState = STATE_GAME;
+
+                PlaySound(sIngame);
+
+                // Initialize player based on selected character
+                player.texture = playerTopDown[selectedPlayerIndex];
+                player.rotationDeg = 0.0f;
+                player.scale = 150.0f / player.texture.width;
+                player.speed = 350.0f;
+
+                player.position.x = (screenWidth - player.texture.width * player.scale) * 0.5f;
+                player.position.y = (screenHeight - player.texture.height * player.scale) * 0.6f;
+                playerInitialized = true;
+
+                gCurrentBullets = gMaxBullets;
+                gIsReloading = false;
+
+                // Start game timer
+                gameTimer = 300.0;
+                timerActive = true;
+            }
+        }
+
+        // ========================= DRAWING / RENDERING =========================
+        BeginDrawing();
+        ClearBackground(RAYWHITE);
+
+        // --------- RENDER: MAIN MENU ---------
+        if (gameState == STATE_MENU)
+        {
+            DrawFullScreen(MenuBg, screenWidth, screenHeight);
+
+            int renderWidth = GetRenderWidth();
+            int renderHeight = GetRenderHeight();
+
+            // Game title
+            int titleSize = 100;
+            int titleWidth = MeasureText("ALIEN RAID", titleSize);
+            DrawText("ALIEN RAID", (renderWidth - titleWidth) / 2, renderHeight / 4, titleSize, GREEN);
+
+            // Buttons
+            int fontSize = 40;
+            const int padX = 24, padY = 10;
+
+            int startWidth = MeasureText("START GAME", fontSize);
+            int startX = (renderWidth - startWidth) / 2;
+            int startY = renderHeight / 2;
+            Rectangle btnStart = {
+                startX - padX, startY - padY,
+                startWidth + 2 * padX, fontSize + 2 * padY};
+
+            int quitWidth = MeasureText("QUIT GAME", fontSize);
+            int quitX = (renderWidth - quitWidth) / 2;
+            int quitY = startY + 60;
+            Rectangle btnQuit = {
+                quitX - padX, quitY - padY,
+                quitWidth + 2 * padX, fontSize + 2 * padY};
+
+            // Hover highlight
+            Vector2 mouse = GetMousePosition();
+            if (CheckCollisionPointRec(mouse, btnStart))
+                DrawRectangleRec(btnStart, (Color){220, 220, 220, 255});
+            if (CheckCollisionPointRec(mouse, btnQuit))
+                DrawRectangleRec(btnQuit, (Color){220, 220, 220, 255});
+
+            // Show selected option in red
+            Color startColor = (menuSelection == 0) ? RED : DARKGRAY;
+            Color quitColor = (menuSelection == 1) ? RED : DARKGRAY;
+
+            DrawText("START GAME", startX, startY, fontSize, startColor);
+            DrawText("QUIT GAME", quitX, quitY, fontSize, quitColor);
+
+            // Input tip
+            const char *tip = "USE ARROWS / MOUSE // PRESS ENTER / CLICK TO SELECT";
+            int tipSize = 20;
+            int tipWidth = MeasureText(tip, tipSize);
+            DrawText(tip, (renderWidth - tipWidth) / 2, quitY + 60, tipSize, GRAY);
+        }
+        // --------- RENDER: GAME STATE ---------
+        else if (gameState == STATE_GAME)
+        {
+            if (gameStarted)
+            {
+                // In-game background
+                DrawTextureEx(backgroundTexture, (Vector2){0, 0}, 0.0f, 1.3f, WHITE);
+
+                if (playerInitialized)
+                {
+                    // Draw player with rotation
+                    Rectangle src = {0, 0, player.texture.width, player.texture.height};
+                    Rectangle dst = {
+                        player.position.x + (player.texture.width * player.scale) * 0.5f,
+                        player.position.y + (player.texture.height * player.scale) * 0.5f,
+                        player.texture.width * player.scale,
+                        player.texture.height * player.scale};
+                    Vector2 origin = {dst.width * 0.5f, dst.height * 0.5f};
+
+                    DrawTexturePro(player.texture, src, dst, origin, player.rotationDeg, WHITE);
+
+                    // --- Ammo display UI ---
+                    if (gIsReloading)
+                    {
+                        DrawText("Reloading...", 50, 50, 30, RED);
+                    }
+                    else
+                    {
+                        DrawText(
+                            TextFormat("Bullets: %d / %d", gCurrentBullets, gMaxBullets),
+                            50, 50, 30, DARKBLUE);
+                        if (gCurrentBullets == 0)
+                            DrawText("Out of bullets! Press R to reload!", 50, 90, 20, GRAY);
+                    }
+
+                    // --- Time remaining UI ---
+                    int minutes = (int)(gameTimer / 60.0);
+                    int seconds = (int)fmod(gameTimer, 60.0);
+                    char timeStr[32];
+                    sprintf(timeStr, "Time remaining: %02d:%02d", minutes, seconds);
+                    int tw = MeasureText(timeStr, 30);
+                    DrawText(timeStr, screenWidth - tw - 20, 40, 30, DARKGREEN);
+                }
+
+                // --- Draw bullets ---
+                for (int i = 0; i < MAX_BULLETS; i++)
+                {
+                    if (!bullets[i].active)
+                        continue;
+
+                    Rectangle rect = {
+                        bullets[i].position.x,
+                        bullets[i].position.y,
+                        BULLET_W, BULLET_H};
+                    Vector2 org = {BULLET_W * 0.5f, BULLET_H * 0.5f};
+                    DrawRectanglePro(rect, org, bullets[i].rotationDeg, BLUE);
+                }
+
+                // --- Draw enemies ---
+                float enemyScale = 0.2f;
+                for (int i = 0; i < MAX_ENEMIES; i++)
+                {
+                    if (!gEnemies[i].active)
+                        continue;
+
+                    Vector2 origin = {enemyTexture.width * enemyScale / 2,
+                                      enemyTexture.height * enemyScale / 2};
+                    Rectangle src = {0, 0, enemyTexture.width, enemyTexture.height};
+                    Rectangle dst = {
+                        gEnemies[i].position.x,
+                        gEnemies[i].position.y,
+                        enemyTexture.width * enemyScale,
+                        enemyTexture.height * enemyScale};
+                    DrawTexturePro(enemyTexture, src, dst, origin, gEnemies[i].rotationDeg, WHITE);
+                }
+
+                // --- Draw player health hearts ---
+                for (int i = 0; i < PLAYER_MAX_HEALTH; i++)
+                {
+                    Color c = (i < gPlayerHealth) ? RED : (Color){150, 150, 150, 255};
+                    DrawRectangle(50 + i * 30, 100, 20, 20, c);
+                    DrawText("<3", 50 + i * 30 - 2, 98, 20, RAYWHITE);
+                }
+            }
+            else
+            {
+                DrawFullScreen(CharSelectBg, screenWidth, screenHeight);
+                DrawText("Press ESC to return to menu", 620, 160, 20, GRAY);
+
+                // TIP2 (Scoring system) - Centered below character portraits
+                int tipFont = 20;
+
+                const char *line1 = "SCORING SYSTEM";
+                const char *line2 = "TIER S = 5:00 MINUTES";
+                const char *line3 = "TIER A = 4:59 - 3:00 MINUTES";
+                const char *line4 = "TIER B = 2:59 - 1:30 MINUTES";
+                const char *line5 = "TIER C = 1:29 - 0:00 MINUTES";
+
+                int yStart = 500; // starting Y position (below portraits)
+
+                // Draw each line centered
+                DrawText(line1, (screenWidth - MeasureText(line1, tipFont)) / 2 - 90, yStart + 60, tipFont, LIGHTGRAY);
+                DrawText(line2, (screenWidth - MeasureText(line2, tipFont)) / 2 - 90, yStart + 90, tipFont, LIGHTGRAY);
+                DrawText(line3, (screenWidth - MeasureText(line3, tipFont)) / 2 - 90, yStart + 120, tipFont, LIGHTGRAY);
+                DrawText(line4, (screenWidth - MeasureText(line4, tipFont)) / 2 - 90, yStart + 150, tipFont, LIGHTGRAY);
+                DrawText(line5, (screenWidth - MeasureText(line5, tipFont)) / 2 - 90, yStart + 180, tipFont, LIGHTGRAY);
+
+                // Character selection screen (before game start)
+                // Draw each character portrait and name
+                for (int i = 0; i < 3; i++)
+                {
+                    Color color = (i == selectedPlayerIndex) ? RED : DARKBLUE;
+                    float scale = 150.0f / playerPortraits[i].width * 0.8f;
+
+                    DrawTextureEx(
+                        playerPortraits[i],
+                        (Vector2){selectPositions[i] + 10, 290},
+                        0.0f, scale, WHITE);
+                    DrawRectangleLines(selectPositions[i], 300, 150, 150, color);
+
+                    int nameW = MeasureText(playerNames[i], 40);
+                    DrawText(
+                        playerNames[i],
+                        selectPositions[i] + 75 - nameW / 2,
+                        460, 40, color);
+                }
+
+                if (playerConfirmed)
+                {
+                    DrawText(
+                        TextFormat("You chose: %s", playerNames[selectedPlayerIndex]),
+                        630, 600, 30, WHITE);
+                    DrawText("Press ENTER again to start", 620, 640, 20, LIGHTGRAY);
+                }
+            }
+        }
+        // --------- RENDER: COUNTDOWN SCREEN ---------
+        else if (gameState == STATE_COUNTDOWN)
+        {
+            ClearBackground(WHITE);
+
+            char text[16];
+            if (countdownValue > 0)
+                sprintf(text, "%d", (int)countdownValue);
+            else
+            {
+                sprintf(text, "START!");
+            }
+
+            int fontSize = 150;
+            int tw = MeasureText(text, fontSize);
+            DrawText(
+                text,
+                (screenWidth - tw) / 2,
+                (screenHeight - fontSize) / 2,
+                fontSize, RED);
+        }
+        // --------- RENDER: GAME OVER SCREEN ---------
+        else if (gameState == STATE_GAMEOVER)
+        {
+            DrawFullScreen(GameOverBg, screenWidth, screenHeight);
+
+            // "GAME OVER" text
+            const char *title = "GAME OVER";
+            int fontSize = 120;
+            int tw = MeasureText(title, fontSize);
+            DrawText(title, (screenWidth - tw) / 2, screenHeight / 3, fontSize, RED);
+
+            // NEXT button to go to score screen
+            const char *nextText = "NEXT";
+            int nextSize = 50;
+            int nextW = MeasureText(nextText, nextSize);
+            Rectangle nextBtn = {
+                (float)(screenWidth - nextW) / 2 - 20,
+                (float)(screenHeight / 2) + 100,
+                (float)nextW + 40,
+                80};
+
+            Vector2 mouse = GetMousePosition();
+            bool hover = CheckCollisionPointRec(mouse, nextBtn);
+
+            DrawRectangleRec(nextBtn, hover ? DARKGRAY : GRAY);
+            DrawText(nextText, nextBtn.x + 20, nextBtn.y + 15, nextSize, WHITE);
+
+            // Click NEXT → go to score screen
+            if (hover && IsMouseButtonPressed(MOUSE_LEFT_BUTTON))
+            {
+                gameState = STATE_SCORE;
+                PlaySound(sConfirm);
+            }
+        }
+        // --------- RENDER: SCORE / RANKING SCREEN ---------
+        else if (gameState == STATE_SCORE)
+        {
+            DrawFullScreen(ScoreBg, screenWidth, screenHeight);
+
+            // Calculate time survived
+            double timeSurvived = 300.0 - gameTimer;
+            if (timeSurvived < 0)
+                timeSurvived = 0;
+
+            // Determine rank based on survival time
+            const char *rank;
+            if (timeSurvived >= 300.0)
+                rank = "S";
+            else if (timeSurvived >= 180.0)
+                rank = "A";
+            else if (timeSurvived >= 90.0)
+                rank = "B";
+            else
+                rank = "C";
+
+            // Draw rank text
+            char rankText[64];
+            sprintf(rankText, "Your Rating: %s", rank);
+            int fontSize = 100;
+            int rankW = MeasureText(rankText, fontSize);
+            DrawText(rankText, (screenWidth - rankW) / 2, screenHeight / 3, fontSize, WHITE);
+
+            // Draw time survived text
+            char timeStr[64];
+            int minutes = (int)(timeSurvived / 60);
+            int seconds = (int)fmod(timeSurvived, 60);
+            sprintf(timeStr, "Time Survived: %02d:%02d", minutes, seconds);
+            int timeW = MeasureText(timeStr, 40);
+            DrawText(timeStr, (screenWidth - timeW) / 2, screenHeight / 2, 40, LIGHTGRAY);
+
+            // "BACK TO MENU" button
+            const char *menuText = "BACK TO MENU";
+            int menuSize = 40;
+            int menuW = MeasureText(menuText, menuSize);
+            Rectangle menuBtn = {
+                (float)(screenWidth - menuW) / 2 - 20,
+                (float)(screenHeight / 2) + 120,
+                (float)menuW + 40,
+                70};
+
+            Vector2 mouse = GetMousePosition();
+            bool hover = CheckCollisionPointRec(mouse, menuBtn);
+
+            DrawRectangleRec(menuBtn, hover ? LIGHTGRAY : GRAY);
+            DrawText(menuText, menuBtn.x + 20, menuBtn.y + 15, menuSize, BLACK);
+
+            // Click → reset and go back to menu
+            if (hover && IsMouseButtonPressed(MOUSE_LEFT_BUTTON))
+            {
+                gameState = STATE_MENU;
+                playerConfirmed = false;
+                gameStarted = false;
+                countdownActive = false;
+                playerInitialized = false;
+
+                gCurrentBullets = gMaxBullets;
+                gIsReloading = false;
+                timerActive = false;
+
+                gPlayerHealth = PLAYER_MAX_HEALTH;
+                gPlayerInvulnerable = false;
+                gInvulnTimer = 0.0f;
+
+                gameTimer = 300.0;
+                ResetEntities(bullets, gEnemies);
+
+                PlaySound(sConfirm);
+                PlaySound(sIntroMusic);
+            }
+        }
+
+        EndDrawing();
+    }
+
+    // ----------------------------------------------------
+    // 7. CLEANUP / RESOURCE UNLOADING
+    // ----------------------------------------------------
+
+    // Unload sounds
+    UnloadSound(sSelect);
+    UnloadSound(sConfirm);
+    UnloadSound(sCountdown);
+    UnloadSound(sReload);
+    UnloadSound(sShoot);
+    UnloadSound(sLose);
+    UnloadSound(sIngame);
+    UnloadSound(sIntroMusic);
+    UnloadSound(sDamaged);
+    UnloadSound(sEnemyDeath);
+    UnloadSound(sGameOver);
+    UnloadSound(sScore);
+
+    // Unload textures
+    UnloadTexture(backgroundTexture);
+    UnloadTexture(enemyTexture);
+
+    for (int i = 0; i < 3; i++)
+    {
+        UnloadTexture(playerPortraits[i]);
+        UnloadTexture(playerTopDown[i]);
+    }
+    UnloadTexture(MenuBg);
+    UnloadTexture(CharSelectBg);
+    UnloadTexture(GameOverBg);
+    UnloadTexture(ScoreBg);
+
+    // Shutdown audio + window
+    CloseAudioDevice();
+    CloseWindow();
+    return 0;
+}
